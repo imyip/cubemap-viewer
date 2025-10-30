@@ -1,0 +1,57 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装依赖
+        run: |
+          sudo apt update
+          sudo apt install -y openjdk-17-jdk maven wine wget unzip
+
+      - name: 下载并安装 Launch4j
+        run: |
+          wget -q https://sourceforge.net/projects/launch4j/files/launch4j-3/3.14/launch4j-3.14-linux.zip
+          unzip -qq launch4j-3.14-linux.zip -d /opt/launch4j
+
+      - name: 构建 Maven 项目
+        run: mvn clean package -DskipTests
+
+      - name: 生成 EXE 文件
+        run: |
+          # 写一个 Launch4j 配置文件
+          cat > launch4j-config.xml <<'EOF'
+          <launch4jConfig>
+            <dontWrapJar>false</dontWrapJar>
+            <headerType>gui</headerType>
+            <jar>target/cubemap-viewer-1.0-SNAPSHOT.jar</jar>
+            <outfile>target/cubemap-viewer.exe</outfile>
+            <errTitle>cubemap-viewer</errTitle>
+            <chdir>.</chdir>
+            <priority>normal</priority>
+            <downloadUrl>https://www.java.com/download/</downloadUrl>
+            <stayAlive>false</stayAlive>
+            <manifest></manifest>
+            <icon></icon>
+            <jre>
+              <minVersion>11</minVersion>
+            </jre>
+          </launch4jConfig>
+          EOF
+
+          wine /opt/launch4j/launch4j launch4j-config.xml
+
+      - name: 上传 EXE 构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: cubemap-viewer-exe
+          path: target/cubemap-viewer.exe
