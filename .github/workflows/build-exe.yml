@@ -8,74 +8,208 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        java: [11, 17, 21]
-    
-    steps:
-    - name: 检出代码
-      uses: actions/checkout@v4
-    
-    - name: 设置 JDK ${{ matrix.java }}
-      uses: actions/setup-java@v4
-      with:
-        java-version: ${{ matrix.java }}
-        distribution: 'temurin'
-        cache: 'maven'
-    
-    - name: 使用 Maven 构建
-      run: mvn clean package -B
-    
-    - name: 运行测试
-      run: mvn test -B
-    
-    - name: 上传构建产物
-      uses: actions/upload-artifact@v4
-      if: matrix.os == 'ubuntu-latest' && matrix.java == '17'
-      with:
-        name: cubemap-viewer-jar
-        path: target/*.jar
-        retention-days: 30
-    
-    - name: 生成构建报告
-      if: always()
-      run: |
-        echo "构建状态: ${{ job.status }}"
-        echo "操作系统: ${{ matrix.os }}"
-        echo "Java 版本: ${{ matrix.java }}"
-
-  release:
-    needs: build
+  build-jar:
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     
     steps:
     - name: 检出代码
       uses: actions/checkout@v4
     
-    - name: 设置 JDK
+    - name: 设置 JDK 17
       uses: actions/setup-java@v4
       with:
         java-version: '17'
         distribution: 'temurin'
         cache: 'maven'
     
-    - name: 构建发布版本
-      run: mvn clean package -B -DskipTests
+    - name: 使用 Maven 构建 JAR
+      run: mvn clean package -B
     
-    - name: 下载构建产物
+    - name: 运行测试
+      run: mvn test -B
+    
+    - name: 上传 JAR 文件
+      uses: actions/upload-artifact@v4
+      with:
+        name: jar-file
+        path: target/*.jar
+        retention-days: 30
+
+  build-windows-exe:
+    needs: build-jar
+    runs-on: windows-latest
+    
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+    
+    - name: 设置 JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: 'maven'
+    
+    - name: 下载 JAR 文件
       uses: actions/download-artifact@v4
       with:
-        name: cubemap-viewer-jar
+        name: jar-file
+        path: target
+    
+    - name: 安装 Launch4j
+      shell: pwsh
+      run: |
+        Invoke-WebRequest -Uri "https://sourceforge.net/projects/launch4j/files/launch4j-3/3.50/launch4j-3.50-win32.zip/download" -OutFile "launch4j.zip"
+        Expand-Archive -Path "launch4j.zip" -DestinationPath "."
+        echo "$PWD\launch4j" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+    
+    - name: 创建 Launch4j 配置文件
+      shell: pwsh
+      run: |
+        $jarFile = Get-ChildItem -Path "target" -Filter "*.jar" | Select-Object -First 1
+        $jarName = $jarFile.Name
+        
+        $config = @"
+        <?xml version="1.0" encoding="UTF-8"?>
+        <launch4jConfig>
+          <dontWrapJar>false</dontWrapJar>
+          <headerType>gui</headerType>
+          <jar>target/$jarName</jar>
+          <outfile>target/CubemapViewer.exe</outfile>
+          <errTitle>Cubemap Viewer Error</errTitle>
+          <cmdLine></cmdLine>
+          <chdir>.</chdir>
+          <priority>normal</priority>
+          <downloadUrl>https://www.oracle.com/java/technologies/downloads/</downloadUrl>
+          <supportUrl></supportUrl>
+          <stayAlive>false</stayAlive>
+          <restartOnCrash>false</restartOnCrash>
+          <manifest></manifest>
+          <icon></icon>
+          <jre>
+            <path>%JAVA_HOME%</path>
+            <bundledJre64Bit>false</bundledJre64Bit>
+            <bundledJreAsFallback>false</bundledJreAsFallback>
+            <minVersion>11</minVersion>
+            <maxVersion></maxVersion>
+            <jdkPreference>preferJre</jdkPreference>
+            <runtimeBits>64/32</runtimeBits>
+          </jre>
+        </launch4jConfig>
+        "@
+        
+        $config | Out-File -FilePath "launch4j-config.xml" -Encoding UTF8
+    
+    - name: 使用 Launch4j 生成 EXE
+      shell: pwsh
+      run: |
+        & "launch4j\launch4jc.exe" "launch4j-config.xml"
+    
+    - name: 验证 EXE 文件
+      shell: pwsh
+      run: |
+        if (Test-Path "target/CubemapViewer.exe") {
+          Write-Host "✓ EXE 文件生成成功"
+          $size = (Get-Item "target/CubemapViewer.exe").Length / 1MB
+          Write-Host "文件大小: $([math]::Round($size, 2)) MB"
+        } else {
+          Write-Error "EXE 文件生成失败"
+          exit 1
+        }
+    
+    - name: 上传 Windows EXE
+      uses: actions/upload-artifact@v4
+      with:
+        name: windows-exe
+        path: target/CubemapViewer.exe
+        retention-days: 30
+
+  build-windows-installer:
+    needs: build-jar
+    runs-on: windows-latest
+    
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+    
+    - name: 设置 JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: 'maven'
+    
+    - name: 构建 JAR
+      run: mvn clean package -B -DskipTests
+    
+    - name: 使用 jpackage 创建 Windows 安装包
+      shell: pwsh
+      run: |
+        $jarFile = Get-ChildItem -Path "target" -Filter "*.jar" | Select-Object -First 1
+        $jarPath = $jarFile.FullName
+        
+        # 创建输出目录
+        New-Item -ItemType Directory -Force -Path "installer-output"
+        
+        # 使用 jpackage 创建 Windows 安装程序
+        jpackage `
+          --input target `
+          --name "CubemapViewer" `
+          --main-jar $jarFile.Name `
+          --type exe `
+          --dest installer-output `
+          --app-version "1.0.0" `
+          --description "A cubemap viewer written in Java" `
+          --vendor "dot-cross" `
+          --win-console `
+          --win-shortcut `
+          --win-menu
+    
+    - name: 上传 Windows 安装程序
+      uses: actions/upload-artifact@v4
+      with:
+        name: windows-installer
+        path: installer-output/*.exe
+        retention-days: 30
+
+  release:
+    needs: [build-windows-exe, build-windows-installer]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+    
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+    
+    - name: 下载所有构建产物
+      uses: actions/download-artifact@v4
+      with:
         path: artifacts
     
-    - name: 创建 Release
+    - name: 列出所有文件
+      run: |
+        echo "构建产物列表:"
+        ls -R artifacts/
+    
+    - name: 创建 Release（仅当推送标签时）
       if: startsWith(github.ref, 'refs/tags/')
       uses: softprops/action-gh-release@v1
       with:
-        files: artifacts/*.jar
+        files: |
+          artifacts/windows-exe/*.exe
+          artifacts/windows-installer/*.exe
+          artifacts/jar-file/*.jar
+        body: |
+          ## Cubemap Viewer Release
+          
+          ### 下载说明：
+          - **CubemapViewer.exe** - Windows 可执行文件（需要安装 Java 17+）
+          - **CubemapViewer-1.0.0.exe** - Windows 安装程序（包含 Java 运行时）
+          - **cubemap-viewer-*.jar** - 跨平台 JAR 文件
+          
+          ### 使用方法：
+          1. 下载 Windows 安装程序或 EXE 文件
+          2. 如果使用 EXE，确保已安装 Java 17 或更高版本
+          3. 运行程序并加载 cubemap 图像
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
